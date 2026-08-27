@@ -1,0 +1,14 @@
+/target
+/target-linux
+/corpus
+/crashes
+/output
+/coverage
+/bundle
+/programs/*.so
+/fixtures/mock_sy.so
+/fc-workdir-*
+/fc-tmp-*
+/out_*.json
+*.orig
+.build-state.json

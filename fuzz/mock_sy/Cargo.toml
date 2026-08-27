@@ -1,0 +1,51 @@
+[package]
+name = "mock_sy"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.79"
+description = "Mock Standardized Yield (SY) program implementing the Exponent Core SY CPI interface, for fuzzing"
+publish = false
+
+# Standalone workspace: keeps this crate out of any parent workspace so the
+# Solana dependency graph here cannot be unified with the harness / client repo.
+[workspace]
+
+[lib]
+name = "mock_sy"
+crate-type = ["cdylib", "lib"]
+
+[features]
+no-entrypoint = []
+
+[dependencies]
+borsh = { version = "1.5", features = ["derive"] }
+solana-program = "3.0.0"
+solana-system-interface = { version = "3.0.0", features = ["bincode"] }
+# `spl-token` v9 is a pure re-export of `spl-token-interface` v2; we depend on
+# the interface crate directly so no SPL Token *processor* code is compiled into
+# this program. The CPI wire format is the real SPL Token one.
+spl-token-interface = "2.0.0"
+
+[dev-dependencies]
+litesvm = "0.15.2"
+solana-instruction = "3.4"
+solana-keypair = "3.1.2"
+solana-signer = "3.0.1"
+solana-transaction = "4.1"
+# Pinned on purpose: litesvm 0.15.2 destructures `ExecutionRecord`
+# exhaustively, and solana-transaction-context 4.2.x added a `touched_flags`
+# field. 4.2.x is semver-compatible, so without this pin cargo picks it and
+# litesvm itself stops compiling.
+solana-transaction-context = "=4.1.2"
+
+[lints.rust.unexpected_cfgs]
+level = "warn"
+check-cfg = [
+    'cfg(target_os, values("solana"))',
+    'cfg(feature, values("custom-heap", "custom-panic"))',
+]
+
+[profile.release]
+overflow-checks = true
+lto = "fat"
+codegen-units = 1

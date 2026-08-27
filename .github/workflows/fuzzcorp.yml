@@ -1,0 +1,119 @@
+name: FuzzCorp bundle
+
+# Builds exponent_core FROM SOURCE, compiles the crucible invariant harness
+# against it, and submits the bundle to FuzzCorp. Every change to the program is
+# therefore compiled and fuzzed — no prebuilt program binary is shipped.
+#
+# Required repo configuration (Settings > Secrets and variables > Actions):
+#   secret  FUZZ_API_KEY       FuzzCorp org-scoped API key (service account)
+#   var     FUZZ_ORGANIZATION  = exponent   (optional; defaults below)
+#   var     FUZZ_PROJECT       = exponent   (optional; defaults below)
+#
+# asymmetric-research/crucible is PUBLIC (verified: repos/.../crucible .private
+# == false), so cargo resolves its git deps anonymously and no token is needed.
+#
+# All three of those are read by fuzz-upload-action@v2 as ENVIRONMENT variables,
+# not inputs — its only inputs are `upload_type` and `upload_path`. Passing
+# `api-key:`/`org:`/`project:` instead fails the action's own "Validate env" step
+# with "Missing required FuzzCorp credentials".
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [main]
+    paths: ['programs/**', 'fuzz/**', '.github/workflows/fuzzcorp.yml']
+  pull_request:
+    paths: ['programs/**', 'fuzz/**', '.github/workflows/fuzzcorp.yml']
+
+concurrency:
+  group: fuzzcorp-bundle-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Agave 4.x, not solana 2.1.x. `cargo build-sbf` passes a target triple to the
+  # platform-tools rust, and the NAME changed: tools v1.54 ship only
+  # `sbpf-solana-solana`, having dropped the old `sbf-solana-solana`. A 2.1.x CLI
+  # still asks for the old name, so v1.54 fails with "can't find crate for `core`
+  # ... the `sbf-solana-solana` target may not be installed". v1.51 carries BOTH
+  # names, so this newer CLI drives v1.51 and v1.54 alike.
+  AGAVE_VERSION: v4.0.2
+  # exponent_core: v1.51 is load-bearing for the stack frames (see build-bundle.sh).
+  # mock_sy: needs v1.54, whose bundled cargo is 1.89. The modern solana-program 3.x
+  # graph pulls `wincode` (and ~25 solana-* crates depend on it), which is edition2024
+  # -- unparseable by the cargo 1.79/1.84 that v1.44/v1.51 bundle. edition2024 was
+  # stabilized in Rust 1.85, so v1.54 is the first toolchain here that can read it.
+  MOCK_SY_TOOLS_VERSION: v1.54
+
+jobs:
+  bundle:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Solana toolchain
+        run: |
+          sh -c "$(curl -sSfL https://release.anza.xyz/${AGAVE_VERSION}/install)"
+          echo "$HOME/.local/share/solana/install/active_release/bin" >> "$GITHUB_PATH"
+
+      # The harness ships its own rust-toolchain.toml (stable) and is built for
+      # musl: FuzzCorp workers are linux/amd64 and a glibc-linked harness uploads
+      # fine, then dies on the worker with a bare `status 1`.
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - name: Install musl linker
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            fuzz/crucible/target
+            target
+          key: fuzzcorp-${{ runner.os }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: fuzzcorp-${{ runner.os }}-
+
+      # The SY program the harness CPIs into. Built with a DIFFERENT toolchain
+      # than exponent_core (v1.54 vs v1.51) -- see the env block for why: this
+      # crate's solana-program 3.x graph needs a cargo that can parse edition2024,
+      # while exponent_core needs v1.51's codegen for its stack frames.
+      - name: Build mock_sy fixture
+        run: |
+          cargo build-sbf --tools-version "$MOCK_SY_TOOLS_VERSION" \
+            --manifest-path fuzz/mock_sy/Cargo.toml
+          mkdir -p fuzz/crucible/fixtures
+          cp fuzz/mock_sy/target/deploy/mock_sy.so fuzz/crucible/fixtures/mock_sy.so
+
+      # build-bundle.sh does the rest: builds exponent_core from source with
+      # tools v1.51 (and FAILS on any frame-overwrite diagnostic), builds the
+      # harness static-musl (and FAILS if it is not statically linked), then
+      # stages the program, DWARF symbols, fixtures, sources and manifest.
+      - name: Build program + harness, assemble bundle
+        working-directory: fuzz/crucible
+        env:
+          CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+          FUZZ_REVISION: ${{ github.sha }}
+        run: ./build-bundle.sh
+
+      # Independent re-check of the assembled bundle, using the SAME gates every
+      # other STRIDE harness runs. build-bundle.sh already enforces these inline;
+      # this runs them again against the finished artifact, so a change to the
+      # builder cannot quietly drop a gate.
+      - name: Bundle guard (pre-upload)
+        run: ./fuzz/crucible/bundle-guard.sh fuzz/crucible/bundle .
+
+      # Only main pushes and manual runs publish. A PR proves the whole thing
+      # builds without spending campaign budget on a branch.
+      - name: Upload bundle to FuzzCorp
+        if: github.event_name != 'pull_request'
+        uses: asymmetric-research/fuzz-upload-action@v2
+        with:
+          upload_type: bundle
+          upload_path: fuzz/crucible/bundle
+        env:
+          FUZZ_ORGANIZATION: ${{ vars.FUZZ_ORGANIZATION || 'exponent' }}
+          FUZZ_PROJECT: ${{ vars.FUZZ_PROJECT || 'exponent' }}
+          FUZZ_API_KEY: ${{ secrets.FUZZ_API_KEY }}

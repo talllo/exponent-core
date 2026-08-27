@@ -1,0 +1,53 @@
+[package]
+name = "exponent_core_fuzz"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+
+[workspace]
+# Standalone workspace - isolated from parent project to avoid Solana version conflicts
+
+[dependencies]
+# Fuzzing framework, tracked on `main` -- client CI must fuzz against the current
+# framework, not a rev frozen at authoring time. (The general "pin to a rev" rule
+# is for a DEV tree, where a moving branch can change the invariant macro under a
+# green build; for a shipped harness, picking up crucible fixes wins.)
+crucible-fuzzer = { git = "https://github.com/asymmetric-research/crucible", branch = "main" }
+crucible-test-context = { git = "https://github.com/asymmetric-research/crucible", branch = "main" }
+crucible-idl-gen = { git = "https://github.com/asymmetric-research/crucible", branch = "main" }
+
+anchor-lang = "1.0.1"
+
+# Compatible client facade crates. LiteSVM 0.15.2 uses a mixed modular Solana
+# graph internally, so these should not be blanket-upgraded to 4.x.
+# `serde` feature: generated native-program (bincode) arg structs derive
+# serde::Serialize, so Pubkey fields must implement it too.
+solana-pubkey = { version = "3.0", features = ["serde"] }
+solana-keypair = "3.1.2"
+solana-signer = "3.0.1"
+
+# Fuzzing
+libafl = { version = "0.15.1", features = ["std", "cli", "prelude"] }
+libafl_bolts = { version = "0.15.1", features = ["std"] }
+arbitrary = { version = "1", features = ["derive"] }
+
+# Utilities
+anyhow = "1.0"
+bytemuck = "1.14"
+ctor = "0.6"
+ctrlc = "3.4"
+
+# Native-program (bincode) instruction encoding — generated code for 4-byte
+# discriminator IDLs serializes args with serde + bincode (fixint, LE).
+serde = { version = "1.0", features = ["derive"] }
+bincode = "1.3"
+
+[[bin]]
+name = "invariant_test"
+path = "src/main.rs"
+
+[features]
+invariant_test = []
+# Admin/config instructions are wired in setup(); the generator gates their actions behind this
+# so fuzzing cannot re-configure or freeze the world the rest of the harness depends on.
+admin_actions = []
